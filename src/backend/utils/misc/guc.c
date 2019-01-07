@@ -1023,6 +1023,15 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"wal_init_zero", PGC_SUSET, WAL_SETTINGS,
+			gettext_noop("Zero-fill WAL file."),
+			NULL
+		},
+		&wal_init_zero,
+		true,
+		NULL, NULL, NULL
+	},
+	{
 		{"wal_recycle", PGC_SUSET, WAL_SETTINGS,
 			gettext_noop("WAL recycling enabled."),
 			NULL

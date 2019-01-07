@@ -96,6 +96,7 @@ bool		wal_log_hints = false;
 bool		wal_compression = false;
 bool		log_checkpoints = false;
 bool		wal_recycle = true;
+bool		wal_init_zero = true;
 int			sync_method = DEFAULT_SYNC_METHOD;
 int			wal_level = WAL_LEVEL_MINIMAL;
 int			CommitDelay = 0;	/* precommit delay in microseconds */
@@ -3008,6 +3009,7 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 	XLogSegNo	max_segno;
 	int			fd;
 	int			nbytes;
+	bool		fail = false;
 
 	XLogFilePath(path, ThisTimeLineID, logsegno);
 
@@ -3050,40 +3052,58 @@ XLogFileInit(XLogSegNo logsegno, bool *use_existent, bool use_lock)
 				 errmsg("could not create file \"%s\": %m", tmppath)));
 
 	/*
-	 * Zero-fill the file.  We have to do this the hard way to ensure that all
-	 * the file space has really been allocated --- on platforms that allow
-	 * "holes" in files, just seeking to the end doesn't allocate intermediate
-	 * space.  This way, we know that we have all the space and (after the
-	 * fsync below) that all the indirect blocks are down on disk.  Therefore,
-	 * fdatasync(2) or O_DSYNC will be sufficient to sync future writes to the
-	 * log file.
-	 *
 	 * Note: ensure the buffer is reasonably well-aligned; this may save a few
 	 * cycles transferring data to the kernel.
 	 */
 	zbuffer = (char *) MAXALIGN(zbuffer_raw);
 	memset(zbuffer, 0, XLOG_BLCKSZ);
-	for (nbytes = 0; nbytes < XLogSegSize; nbytes += XLOG_BLCKSZ)
+
+	if (wal_init_zero) {
+		/*
+		 * Zero-fill the file.  We have to do this the hard way to ensure that
+		 * all the file space has really been allocated --- on platforms that
+		 * allow "holes" in files, just seeking to the end doesn't allocate
+		 * intermediate space.  This way, we know that we have all the space
+		 * and (after the fsync below) that all the indirect blocks are down on
+		 * disk.  Therefore, fdatasync(2) or O_DSYNC will be sufficient to sync
+		 * future writes to the log file.
+		 */
+		for (nbytes = 0; nbytes < XLogSegSize; nbytes += XLOG_BLCKSZ)
+		{
+			errno = 0;
+			if ((int) write(fd, zbuffer, XLOG_BLCKSZ) != (int) XLOG_BLCKSZ)
+			{
+				fail = true;
+				break;
+			}
+		}
+	}
+	else
 	{
 		errno = 0;
-		if ((int) write(fd, zbuffer, XLOG_BLCKSZ) != (int) XLOG_BLCKSZ)
-		{
-			int			save_errno = errno;
+		if (lseek(fd, XLogSegSize - 1, SEEK_SET) == -1 ||
+			write(fd, zbuffer, 1) != 1)
+				fail = true;
+	}
 
-			/*
-			 * If we fail to make the file, delete it to release disk space
-			 */
-			unlink(tmppath);
+	if (fail)
+	{
+		int			save_errno = errno;
 
-			close(fd);
+		/*
+		 * If we fail to make the file, delete it to release disk space
+		 */
+		unlink(tmppath);
 
-			/* if write didn't set errno, assume problem is no disk space */
-			errno = save_errno ? save_errno : ENOSPC;
+		close(fd);
 
-			ereport(ERROR,
-					(errcode_for_file_access(),
-					 errmsg("could not write to file \"%s\": %m", tmppath)));
-		}
+		/* if write didn't set errno, assume problem is no disk space */
+		errno = save_errno ? save_errno : ENOSPC;
+
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write to file \"%s\": %m",
+				 tmppath)));
 	}
 
 	if (pg_fsync(fd) != 0)
